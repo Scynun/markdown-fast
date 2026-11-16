@@ -1027,12 +1027,20 @@ function htmlBlockType(line) {
   return 0;
 }
 
-function isInterrupt(line) {
+function isInterrupt(line, inList = false) {
   if (line.indent > 3) return false;
   if (matchAtx(line)) return true;
   if (matchFence(line)) return true;
   if (isHr(line)) return true;
   if (line.rest[0] === '>') return true;
+  // inside a list item's content, ANY list marker (ordered, any start
+  // number) interrupts a paragraph and starts a nested list (marked:
+  // item text lexed with top=false); at top level only bullets and
+  // ordered lists starting at 1 can interrupt
+  if (inList) {
+    const it = matchListItem(line);
+    if (it && it.content !== null) return true;
+  }
   if (listInterrupts(line)) return true;
   const t = htmlBlockType(line);
   if (t >= 1 && t <= 6) return true;
@@ -1040,8 +1048,8 @@ function isInterrupt(line) {
 }
 
 // A line that could start a block (used for lazy-continuation decisions).
-function isBlockStart(line) {
-  return isInterrupt(line) || matchSetext(line) !== 0;
+function isBlockStart(line, inList = false) {
+  return isInterrupt(line, inList) || matchSetext(line) !== 0;
 }
 
 // Is a paragraph still open after this content line? An indented-code line
@@ -1063,16 +1071,16 @@ function updateLastPara(line, lastPara) {
 // leaves the state unchanged; any other block start closes it; any other
 // text line opens it. (cm-250/251/292/293: a lazy line must continue the
 // innermost open paragraph, however deeply nested.)
-function openParaAfter(line, prev) {
+function openParaAfter(line, prev, inList = false) {
   if (line.blank) return false;
-  if (line.indent <= 3 && line.rest[0] === '>') return openParaAfter(stripQuoteMarker(line), prev);
+  if (line.indent <= 3 && line.rest[0] === '>') return openParaAfter(stripQuoteMarker(line), prev, false);
   const it = matchListItem(line);
   if (it) {
     if (it.content === null) return false;
-    return openParaAfter(it.content, false);
+    return openParaAfter(it.content, false, true);
   }
   if (line.indent >= 4) return prev;
-  if (isBlockStart(line)) return false;
+  if (isBlockStart(line, inList)) return false;
   return true;
 }
 
@@ -1283,7 +1291,7 @@ function splitRow(line) {
 
 // ---------- paragraph ----------
 
-function parseParagraph(lines, i, refs) {
+function parseParagraph(lines, i, refs, inList = false) {
   const n = lines.length;
   const textLines = [];
   let j = i;
@@ -1299,7 +1307,7 @@ function parseParagraph(lines, i, refs) {
         const text = textLines.join('\n').replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
         return { nodes: [{ t: 'h', level: se, text }], next: j + 1 };
       }
-      if (isInterrupt(line)) break;
+      if (isInterrupt(line, inList)) break;
     }
     // paragraph text keeps the line's leading spaces (marked keeps them);
     // a lazy setext line inside a blockquote is indented by 4 spaces
@@ -1398,7 +1406,7 @@ function parseBlockquote(lines, i, refs) {
     }
     break;
   }
-  return { node: { t: 'quote', children: parseBlocks(inner, refs) }, next: j };
+  return { node: { t: 'quote', children: parseBlocks(inner, refs, false) }, next: j };
 }
 
 // Expand tabs in a line's leading whitespace run to spaces, column-aware
@@ -1456,7 +1464,7 @@ function parseList(lines, i, refs) {
     if (it.content !== null) content.push(it.content);
     j++;
     let itemBlank = false;
-    let lastPara = it.content !== null ? openParaAfter(it.content, false) : false;
+    let lastPara = it.content !== null ? openParaAfter(it.content, false, true) : false;
     // Block state at item level, for looseness: a blank line separates
     // two top-level blocks of the item UNLESS it lies inside a fenced
     // code block, an HTML block (types 1-5), an indented code block, or
@@ -1479,7 +1487,7 @@ function parseList(lines, i, refs) {
       const li = matchListItem(ln);
       if (li) { prevBlock = 'list'; nestedList = { ordered: li.ordered, delim: li.delim, contentIndent: li.contentIndent }; return; }
       if (ln.indent >= 4) { prevBlock = 'code'; prevCode = true; return; }
-      if (isBlockStart(ln)) { prevBlock = 'other'; return; }
+      if (isBlockStart(ln, true)) { prevBlock = 'other'; return; }
       prevBlock = 'para';
     };
     if (it.content !== null) trackFirst(it.content);
@@ -1547,7 +1555,7 @@ function parseList(lines, i, refs) {
         const lastParaBefore = lastPara;
         const fenceBefore = inFence;
         const htmlBefore = inHtml;
-        lastPara = openParaAfter(stripped, lastPara);
+        lastPara = openParaAfter(stripped, lastPara, true);
         // update block state from this line
         if (fenceBefore) {
           if (isFenceClose(stripped, fenceBefore.ch, fenceBefore.len)) inFence = null;
@@ -1578,7 +1586,7 @@ function parseList(lines, i, refs) {
           prevBlock = 'html';
         } else if (stripped.indent >= 4 && !lastParaBefore) {
           prevBlock = 'code';
-        } else if (isBlockStart(stripped)) {
+        } else if (isBlockStart(stripped, true)) {
           prevBlock = 'other';
           nestedList = null;
         } else if (lastParaBefore) {
@@ -1600,7 +1608,7 @@ function parseList(lines, i, refs) {
       }
       // lazy continuation of the item's paragraph? (a setext-looking
       // lazy line is paragraph text, never a heading)
-      if (lastPara && !isInterrupt(ln)) {
+      if (lastPara && !isInterrupt(ln, true)) {
         if (itemBlank) loose = true;
         itemBlank = false;
         const base = ln.indent >= 4 ? stripColumns(expandLeadingTabs(ln), 4) : ln;
@@ -1614,7 +1622,7 @@ function parseList(lines, i, refs) {
     }
     // drop trailing blank lines of the item
     while (content.length && content[content.length - 1].blank) content.pop();
-    const children = parseBlocks(content, refs);
+    const children = parseBlocks(content, refs, true);
     items.push({ children, task: null });
   }
   // task list markers + tight/loose rendering
@@ -1633,7 +1641,7 @@ function parseList(lines, i, refs) {
 
 // ---------- main block loop ----------
 
-function parseBlocks(lines, refs) {
+function parseBlocks(lines, refs, inList = false) {
   const nodes = [];
   const n = lines.length;
   let i = 0;
@@ -1760,7 +1768,7 @@ function parseBlocks(lines, refs) {
       const header = splitRow(line);
       const rows = [];
       let j = i + 2;
-      while (j < n && !lines[j].blank && !isBlockStart(lines[j])) {
+      while (j < n && !lines[j].blank && !isBlockStart(lines[j], inList)) {
         rows.push(splitRow(lines[j]));
         j++;
       }
@@ -1772,7 +1780,7 @@ function parseBlocks(lines, refs) {
     const def = tryParseDef(lines, i, refs);
     if (def) { i = def.next; continue; }
     // paragraph (may become a setext heading)
-    const p = parseParagraph(lines, i, refs);
+    const p = parseParagraph(lines, i, refs, inList);
     for (const nd of p.nodes) nodes.push(nd);
     i = p.next;
   }
