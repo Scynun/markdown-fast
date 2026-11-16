@@ -309,17 +309,20 @@ function findLinkTextEnd(s, openIdx) {
     if (c === '`') {
       let j = i;
       while (j < s.length && s[j] === '`') j++;
-      const n = j - i;
-      // find a matching run of exactly n backticks
+      // a code span inside a label: marked's label regex closes it with
+      // a backtick run of ANY length (`+ ... `+), not necessarily the
+      // same length as the opener (e.g. ``commit` is a valid label span,
+      // rendered literally since the equal-count code rule doesn't match)
       let k = j;
       let found = -1;
       while (k < s.length) {
         if (s[k] === '`') {
           let m = k;
           while (m < s.length && s[m] === '`') m++;
-          if (m - k === n) { found = m; break; }
-          k = m;
-        } else k++;
+          found = m;
+          break;
+        }
+        k++;
       }
       if (found === -1) return -1;
       i = found;
@@ -1777,8 +1780,10 @@ function parseBlocks(lines, refs, inList = false) {
       let j = i + 2;
       // a "blank" line that contains a tab is still a table row (marked's
       // table body rejects only space-only blank lines, ` *\n`); it
-      // becomes a row of empty cells, and the table continues past it
-      while (j < n && (!lines[j].blank || lines[j].raw.includes('\t')) && !isBlockStart(lines[j], inList)) {
+      // becomes a row of empty cells, and the table continues past it.
+      // A setext-looking line is also a row (marked's table body excludes
+      // only ATX headings, not setext), so use isInterrupt, not isBlockStart.
+      while (j < n && (!lines[j].blank || lines[j].raw.includes('\t')) && !isInterrupt(lines[j], inList)) {
         rows.push(splitRow(lines[j]));
         j++;
       }
