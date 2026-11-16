@@ -1395,6 +1395,24 @@ function parseBlockquote(lines, i, refs) {
   return { node: { t: 'quote', children: parseBlocks(inner, refs) }, next: j };
 }
 
+// Expand tabs in a line's leading whitespace run to spaces, column-aware
+// from line.base (marked's J): list-item lines are tab-expanded before the
+// item indent is stripped, so a tab past the strip boundary becomes spaces
+// instead of staying a literal tab in the item's content (doc-01/05/06/...).
+function expandLeadingTabs(line) {
+  const raw = line.raw;
+  let i = 0;
+  let col = line.base;
+  let out = '';
+  while (i < raw.length && (raw[i] === ' ' || raw[i] === '\t')) {
+    if (raw[i] === ' ') { out += ' '; col++; }
+    else { const r = 4 - (col % 4); out += ' '.repeat(r); col += r; }
+    i++;
+  }
+  if (i === 0) return line;
+  return makeLine(out + raw.slice(i), line.base);
+}
+
 // ---------- lists ----------
 
 function parseList(lines, i, refs) {
@@ -1477,7 +1495,7 @@ function parseList(lines, i, refs) {
       // the item (doc-02: fence content at indent 0 must not end the
       // item, or the definitions after it are swallowed as code)
       if ((inFence || inHtml) && !ln.blank) {
-        const stripped = stripColumns(ln, ci);
+        const stripped = stripColumns(expandLeadingTabs(ln), ci);
         content.push(stripped);
         if (inFence) {
           if (isFenceClose(stripped, inFence.ch, inFence.len)) inFence = null;
@@ -1492,7 +1510,7 @@ function parseList(lines, i, refs) {
         continue;
       }
       if (ln.indent >= ci) {
-        const stripped = stripColumns(ln, ci);
+        const stripped = stripColumns(expandLeadingTabs(ln), ci);
         // a blank line between two top-level blocks of the item makes the
         // list loose; a blank nested inside a sub-block does not: inside
         // a fence, an HTML block (types 1-5), an indented code block, or
@@ -1579,7 +1597,7 @@ function parseList(lines, i, refs) {
       if (lastPara && !isInterrupt(ln)) {
         if (itemBlank) loose = true;
         itemBlank = false;
-        const base = ln.indent >= 4 ? stripColumns(ln, 4) : ln;
+        const base = ln.indent >= 4 ? stripColumns(expandLeadingTabs(ln), 4) : ln;
         content.push({ ...base, lazy: true });
         lastPara = true;
         prevCode = false;
