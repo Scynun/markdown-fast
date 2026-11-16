@@ -289,13 +289,19 @@ function parseInlineLink(s, closeIdx) {
 }
 
 // Find the index of the ']' matching the '[' at openIdx, or -1.
-// Skips over code spans and escaped characters.
+// Skips over code spans, escaped characters, and complete raw HTML
+// constructs: a ']' inside a tag, comment, CDATA section, processing
+// instruction or declaration does not end the link text (cm-524/536).
 function findLinkTextEnd(s, openIdx) {
   let depth = 0;
   let i = openIdx + 1;
   while (i < s.length) {
     const c = s[i];
     if (c === '\\' && i + 1 < s.length) { i += 2; continue; }
+    if (c === '<') {
+      const tag = matchRawHtml(s, i);
+      if (tag) { i = tag.next; continue; }
+    }
     if (c === '`') {
       let j = i;
       while (j < s.length && s[j] === '`') j++;
@@ -480,9 +486,14 @@ function matchRawHtml(s, i) {
     if (!/[A-Za-z_:]/.test(s[j] || '')) return null;
     j++;
     while (j < s.length && /[A-Za-z0-9_.:-]/.test(s[j])) j++;
-    while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
-    if (s[j] === '=') {
-      j++;
+    // optional =value; whitespace may sit around '='. Peek without
+    // consuming, so a valueless attribute still leaves its separator
+    // for the loop top to see (cm-616: a valueless attribute followed
+    // by another attribute must not kill the tag).
+    let k = j;
+    while (k < s.length && (s[k] === ' ' || s[k] === '\t' || s[k] === '\n')) k++;
+    if (s[k] === '=') {
+      j = k + 1;
       while (j < s.length && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n')) j++;
       if (s[j] === '"' || s[j] === "'") {
         const q = s[j];
@@ -492,10 +503,10 @@ function matchRawHtml(s, i) {
         j++;
       } else {
         // unquoted value: no space, =, <, >, `, " or '
-        let k = j;
-        while (k < s.length && !/[ \t\n=<>"'`]/.test(s[k])) k++;
-        if (k === j) return null;
-        j = k;
+        let k2 = j;
+        while (k2 < s.length && !/[ \t\n=<>"'`]/.test(s[k2])) k2++;
+        if (k2 === j) return null;
+        j = k2;
       }
     }
   }
@@ -1038,6 +1049,38 @@ function updateLastPara(line, lastPara) {
   return true;
 }
 
+// Is the innermost paragraph open after this line, looking through nested
+// container markers? `prev` is the innermost paragraph state before this
+// line. A '>' line recurses into the quote's content with the same state;
+// a list-item line recurses into the item's content with a fresh state
+// (a new item starts a fresh paragraph context); an indented-code line
+// leaves the state unchanged; any other block start closes it; any other
+// text line opens it. (cm-250/251/292/293: a lazy line must continue the
+// innermost open paragraph, however deeply nested.)
+function openParaAfter(line, prev) {
+  if (line.blank) return false;
+  if (line.indent <= 3 && line.rest[0] === '>') return openParaAfter(stripQuoteMarker(line), prev);
+  const it = matchListItem(line);
+  if (it) {
+    if (it.content === null) return false;
+    return openParaAfter(it.content, false);
+  }
+  if (line.indent >= 4) return prev;
+  if (isBlockStart(line)) return false;
+  return true;
+}
+
+// End pattern of an HTML block type 1-5 (null for types 6-7, which end
+// at a blank line).
+function htmlEndRe(ht) {
+  if (ht === 1) return /<\/(pre|script|style|textarea)>/i;
+  if (ht === 2) return /-->/;
+  if (ht === 3) return /\?>/;
+  if (ht === 4) return />/;
+  if (ht === 5) return /\]\]>/;
+  return null;
+}
+
 // ---------- link reference definitions ----------
 
 // First ']' ending a link label (no bracket-depth counting: a definition
@@ -1305,7 +1348,7 @@ function parseBlockquote(lines, i, refs) {
         continue;
       }
       inner.push(innerLine);
-      lastPara = updateLastPara(innerLine, lastPara);
+      lastPara = openParaAfter(innerLine, lastPara);
       j++;
       continue;
     }
@@ -1367,7 +1410,33 @@ function parseList(lines, i, refs) {
     if (it.content !== null) content.push(it.content);
     j++;
     let itemBlank = false;
-    let lastPara = it.content !== null ? updateLastPara(it.content, false) : false;
+    let lastPara = it.content !== null ? openParaAfter(it.content, false) : false;
+    // Block state at item level, for looseness: a blank line separates
+    // two top-level blocks of the item UNLESS it lies inside a fenced
+    // code block, an HTML block (types 1-5), an indented code block, or
+    // a nested list (between two items of the same nested list).
+    let inFence = null;
+    let inHtml = null;
+    let prevCode = false;
+    let prevBlock = null; // 'para' | 'list' | 'code' | 'fence' | 'html' | 'other'
+    let nestedList = null; // {ordered, delim, contentIndent} of the nested list in prevBlock
+    const trackFirst = (ln) => {
+      const f = matchFence(ln);
+      if (f) { inFence = { ch: f.ch, len: f.len }; prevBlock = 'fence'; return; }
+      const ht = htmlBlockType(ln);
+      if (ht >= 1 && ht <= 5) {
+        const er = htmlEndRe(ht);
+        if (!er.test(ln.raw)) inHtml = { endRe: er };
+        prevBlock = 'html';
+        return;
+      }
+      const li = matchListItem(ln);
+      if (li) { prevBlock = 'list'; nestedList = { ordered: li.ordered, delim: li.delim, contentIndent: li.contentIndent }; return; }
+      if (ln.indent >= 4) { prevBlock = 'code'; prevCode = true; return; }
+      if (isBlockStart(ln)) { prevBlock = 'other'; return; }
+      prevBlock = 'para';
+    };
+    if (it.content !== null) trackFirst(it.content);
     while (j < n) {
       const ln = lines[j];
       if (ln.blank) {
@@ -1384,25 +1453,81 @@ function parseList(lines, i, refs) {
       if (ln.indent >= ci) {
         const stripped = stripColumns(ln, ci);
         // a blank line between two top-level blocks of the item makes the
-        // list loose; a blank nested inside a sub-block does not
-        if (itemBlank && stripped.indent === 0) loose = true;
+        // list loose; a blank nested inside a sub-block does not: inside
+        // a fence, an HTML block (types 1-5), an indented code block, or
+        // a nested list (a line indented to the nested list's content, or
+        // another item of the same nested list)
+        if (itemBlank) {
+          const li = matchListItem(stripped);
+          const codeCont = prevCode && stripped.indent >= 4;
+          const listCont = prevBlock === 'list' && nestedList && li &&
+            li.ordered === nestedList.ordered && li.delim === nestedList.delim;
+          const nestedCont = prevBlock === 'list' && nestedList &&
+            stripped.indent >= nestedList.contentIndent;
+          if (!inFence && !inHtml && !codeCont && !listCont && !nestedCont) loose = true;
+        }
         itemBlank = false;
-        // a paragraph continuation that is code-indented loses the extra
-        // 4 columns as well (a fresh block keeps them: the code block
-        // strips them itself when parsed)
+        // a paragraph continuation of the item's OWN paragraph that is
+        // code-indented loses the extra 4 columns (a fresh block keeps
+        // them: the code block strips them itself when parsed; a nested
+        // list marker keeps them so deeper levels still nest, cm-294).
+        // lastPara must be true: after a blank line the paragraph is
+        // closed, so a code-indented line is a fresh code block, not a
+        // continuation (cm-270/254/273).
         let toPush = stripped;
-        if (lastPara && !(isBlockStart(stripped) && isInterrupt(stripped)) && stripped.indent >= 4) {
+        if (lastPara && prevBlock === 'para' && stripped.indent >= 4) {
           toPush = stripColumns(stripped, 4);
         }
         content.push(toPush);
-        lastPara = updateLastPara(stripped, lastPara);
+        const lastParaBefore = lastPara;
+        const fenceBefore = inFence;
+        const htmlBefore = inHtml;
+        lastPara = openParaAfter(stripped, lastPara);
+        // update block state from this line
+        if (fenceBefore) {
+          if (isFenceClose(stripped, fenceBefore.ch, fenceBefore.len)) inFence = null;
+        } else {
+          const f = matchFence(stripped);
+          if (f) inFence = { ch: f.ch, len: f.len };
+        }
+        if (htmlBefore) {
+          if (htmlBefore.endRe.test(stripped.raw)) inHtml = null;
+        } else {
+          const ht = htmlBlockType(stripped);
+          if (ht >= 1 && ht <= 5) {
+            const er = htmlEndRe(ht);
+            if (!er.test(stripped.raw)) inHtml = { endRe: er };
+          }
+        }
+        prevCode = !fenceBefore && !htmlBefore && stripped.indent >= 4 && !lastParaBefore;
+        const li = !fenceBefore && !htmlBefore ? matchListItem(stripped) : null;
+        if (li) {
+          prevBlock = 'list';
+          nestedList = { ordered: li.ordered, delim: li.delim, contentIndent: li.contentIndent };
+        } else if (inFence || fenceBefore) {
+          prevBlock = 'fence';
+        } else if (inHtml || htmlBefore) {
+          prevBlock = 'html';
+        } else if (stripped.indent >= 4 && !lastParaBefore) {
+          prevBlock = 'code';
+        } else if (isBlockStart(stripped)) {
+          prevBlock = 'other';
+          nestedList = null;
+        } else if (lastParaBefore) {
+          // paragraph continuation: stays in the current block
+        } else {
+          prevBlock = 'para';
+          nestedList = null;
+        }
         j++;
         continue;
       }
       // any list item (same list or a different one) ends this item
       const nit = matchListItem(ln);
       if (nit) {
-        if (itemBlank) loose = true;
+        // a blank between two items of this list makes it loose; a blank
+        // before a different list is trailing whitespace, not looseness
+        if (itemBlank && nit.ordered === ordered && nit.delim === delim) loose = true;
         break;
       }
       // lazy continuation of the item's paragraph? (a setext-looking
@@ -1413,6 +1538,7 @@ function parseList(lines, i, refs) {
         const base = ln.indent >= 4 ? stripColumns(ln, 4) : ln;
         content.push({ ...base, lazy: true });
         lastPara = true;
+        prevCode = false;
         j++;
         continue;
       }
@@ -1487,6 +1613,10 @@ function parseBlocks(lines, refs) {
       }
       const langRaw = fence.info.split(/[ \t]+/)[0] || null;
       const lang = langRaw ? unescapeBackslash(langRaw) : null;
+      // the newline just before the closing fence (or the document end)
+      // is a separator, not content: drop exactly one trailing blank
+      // line from the fence body (cm-318)
+      if (buf.length && buf[buf.length - 1] === '') buf.pop();
       nodes.push({ t: 'code', lang, text: buf.length ? buf.join('\n') + '\n' : '' });
       i = j < n ? j + 1 : j;
       continue;
