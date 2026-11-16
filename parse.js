@@ -301,6 +301,10 @@ function findLinkTextEnd(s, openIdx) {
     if (c === '<') {
       const tag = matchRawHtml(s, i);
       if (tag) { i = tag.next; continue; }
+      // an autolink <scheme:...> or <email> inside label text: its
+      // content may contain ']' (cm-526/538), so skip to its '>'
+      const auto = matchAutolink(s, i);
+      if (auto) { i = auto.next; continue; }
     }
     if (c === '`') {
       let j = i;
@@ -401,10 +405,12 @@ function tryLink(s, i, refs, edgePrev, edgeNext) {
   return { node: { t: 'link', href, title, children, img: false }, next };
 }
 
-// Does this inline node list contain a link (not an image)?
+// Does this inline node list contain a link (not an image)? Autolinks
+// do not count: marked lets a link's text contain an autolink (it
+// renders nested <a> tags, e.g. [a <https://x>](#y), doc-04).
 function containsLink(nodes) {
   for (const n of nodes) {
-    if (n.t === 'link' && !n.img) return true;
+    if (n.t === 'link' && !n.img && !n.autolink) return true;
     if ((n.t === 'em' || n.t === 'strong' || n.t === 'del') && containsLink(n.children)) return true;
   }
   return false;
@@ -1326,11 +1332,22 @@ function parseBlockquote(lines, i, refs) {
   const inner = [];
   let j = i;
   let lastPara = false;
+  let inFence = null; // a fence directly inside this quote
   while (j < n) {
     const line = lines[j];
     if (line.indent <= 3 && line.rest[0] === '>') {
       const innerLine = stripQuoteMarker(line);
-      if (innerLine.blank && innerLine.raw !== '') {
+      // track a fence directly inside the quote: its content lines are
+      // not paragraph content, so a marker-less line after one must end
+      // the quote (and the fence), not lazily continue it (doc-01)
+      let fenceClose = false;
+      if (inFence) {
+        fenceClose = isFenceClose(innerLine, inFence.ch, inFence.len);
+      } else {
+        const f = matchFence(innerLine);
+        if (f) inFence = { ch: f.ch, len: f.len };
+      }
+      if (innerLine.blank && innerLine.raw !== '' && !inFence) {
         // whitespace-only content after '>' + one space: it is a content
         // line (a single space of paragraph text) only when the quote ends
         // here; if a '>' line follows it is a blank separator
@@ -1348,7 +1365,12 @@ function parseBlockquote(lines, i, refs) {
         continue;
       }
       inner.push(innerLine);
-      lastPara = openParaAfter(innerLine, lastPara);
+      if (inFence) {
+        if (fenceClose) inFence = null;
+        lastPara = false;
+      } else {
+        lastPara = openParaAfter(innerLine, lastPara);
+      }
       j++;
       continue;
     }
@@ -1450,6 +1472,25 @@ function parseList(lines, i, refs) {
         j++;
         continue;
       }
+      // inside an open fence or HTML block (types 1-5), any line is
+      // content until the block ends, even when it is not indented to
+      // the item (doc-02: fence content at indent 0 must not end the
+      // item, or the definitions after it are swallowed as code)
+      if ((inFence || inHtml) && !ln.blank) {
+        const stripped = stripColumns(ln, ci);
+        content.push(stripped);
+        if (inFence) {
+          if (isFenceClose(stripped, inFence.ch, inFence.len)) inFence = null;
+        } else if (inHtml.endRe.test(stripped.raw)) {
+          inHtml = null;
+        }
+        lastPara = false;
+        prevCode = false;
+        prevBlock = inFence ? 'fence' : 'html';
+        itemBlank = false;
+        j++;
+        continue;
+      }
       if (ln.indent >= ci) {
         const stripped = stripColumns(ln, ci);
         // a blank line between two top-level blocks of the item makes the
@@ -1490,6 +1531,9 @@ function parseList(lines, i, refs) {
           const f = matchFence(stripped);
           if (f) inFence = { ch: f.ch, len: f.len };
         }
+        // a line inside a fence or an HTML block (types 1-5) is not
+        // paragraph content: it cannot be lazily continued (doc-01)
+        if (fenceBefore || htmlBefore) lastPara = false;
         if (htmlBefore) {
           if (htmlBefore.endRe.test(stripped.raw)) inHtml = null;
         } else {
@@ -1584,13 +1628,15 @@ function parseBlocks(lines, refs) {
           let k = j;
           while (k < n && lines[k].blank) k++;
           if (k < n && lines[k].indent >= 4) {
-            while (j < k) { buf.push(' '.repeat(Math.max(0, lines[j].indent - 4))); j++; }
+            while (j < k) { buf.push(stripColumns(lines[j], 4).raw); j++; }
             continue;
           }
           break;
         }
         if (ln.indent >= 4) {
-          buf.push(' '.repeat(ln.indent - 4) + ln.rest);
+          // strip exactly 4 columns: a tab straddling the boundary is
+          // kept as a tab in the content (doc-02: "    \tindented")
+          buf.push(stripColumns(ln, 4).raw);
           j++;
           continue;
         }
@@ -1741,16 +1787,20 @@ function renderBlock(node, refs) {
           '<input disabled="" type="checkbox"> ';
         let inner = '';
         const kids = item.children;
+        // loose task item: the checkbox goes inside the first paragraph
+        const checkInPara = item.task !== null && !node.tight && kids.length && kids[0].t === 'p';
         for (let k = 0; k < kids.length; k++) {
           const kid = kids[k];
           if (kid.t === 'p' && node.tight) {
             // tight: paragraph renders as bare inline content, no newline
             inner += inline(kid.text, refs);
+          } else if (checkInPara && k === 0) {
+            inner += '<p>' + check + inline(kid.text, refs) + '</p>\n';
           } else {
             inner += renderBlock(kid, refs);
           }
         }
-        out += '<li>' + check + inner + '</li>\n';
+        out += '<li>' + (checkInPara ? '' : check) + inner + '</li>\n';
       }
       return out + `</${tag}>\n`;
     }
