@@ -1773,7 +1773,10 @@ function parseBlocks(lines, refs, inList = false) {
       const header = splitRow(line);
       const rows = [];
       let j = i + 2;
-      while (j < n && !lines[j].blank && !isBlockStart(lines[j], inList)) {
+      // a "blank" line that contains a tab is still a table row (marked's
+      // table body rejects only space-only blank lines, ` *\n`); it
+      // becomes a row of empty cells, and the table continues past it
+      while (j < n && (!lines[j].blank || lines[j].raw.includes('\t')) && !isBlockStart(lines[j], inList)) {
         rows.push(splitRow(lines[j]));
         j++;
       }
