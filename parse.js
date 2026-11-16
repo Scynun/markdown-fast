@@ -1316,15 +1316,21 @@ function parseParagraph(lines, i, refs) {
 function stripQuoteMarker(line) {
   // line.rest[0] === '>', indent <= 3
   const markerCol = line.base + line.indent;
-  let raw2 = line.rest.slice(1);
-  let base2 = markerCol + 1;
-  if (raw2[0] === ' ') { raw2 = raw2.slice(1); base2++; }
-  else if (raw2[0] === '\t') {
-    const next = (Math.floor(base2 / 4) + 1) * 4;
-    raw2 = ' '.repeat(next - base2 - 1) + raw2.slice(1);
-    base2++;
+  const raw2 = line.rest.slice(1);
+  // J-expand the whitespace run after '>' (marked's blockquote rule:
+  // the run is expanded starting at the column just after the marker
+  // within this level's line, i.e. line.indent + 1), then drop the
+  // marker's single following space ('> ' separator)
+  let col = line.indent + 1;
+  let i = 0;
+  let expanded = '';
+  while (i < raw2.length && (raw2[i] === ' ' || raw2[i] === '\t')) {
+    if (raw2[i] === ' ') { expanded += ' '; col++; }
+    else { const r = 4 - (col % 4); expanded += ' '.repeat(r); col += r; }
+    i++;
   }
-  return makeLine(raw2, base2);
+  const rest = (expanded.length > 0 ? expanded.slice(1) : '') + raw2.slice(i);
+  return makeLine(rest, markerCol + 1 + (expanded.length > 0 ? 1 : 0));
 }
 
 function parseBlockquote(lines, i, refs) {
