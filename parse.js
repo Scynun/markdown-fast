@@ -395,11 +395,11 @@ function tryLink(s, i, refs, edgePrev, edgeNext) {
   if (clean === null) return null;
   href = clean;
   if (img) {
-    const children = parseInline(text, refs);
+    const children = parseInline(text, refs, undefined, undefined, true);
     const alt = renderTextContent(children);
     return { node: { t: 'link', href, title, children: [], img: true, alt }, next };
   }
-  const children = parseInline(text, refs, s[open - 1], s[close + 1]);
+  const children = parseInline(text, refs, s[open - 1], s[close + 1], true);
   // a link's text may not contain another link
   if (containsLink(children)) return null;
   return { node: { t: 'link', href, title, children, img: false }, next };
@@ -667,7 +667,7 @@ const SPECIAL = new Set(['\\', '`', '[', '!', '<', '&', '*', '_', '~', '\n']);
 const RE_EMAIL_DOMAIN = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/;
 const EMAIL_LOCAL_CH = /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/;
 
-function parseInline(text, refs, edgePrev, edgeNext) {
+function parseInline(text, refs, edgePrev, edgeNext, inLink = false) {
   const nodes = [];
   let buf = '';
   const flush = () => {
@@ -679,7 +679,9 @@ function parseInline(text, refs, edgePrev, edgeNext) {
     const c = text[i];
     // GFM extended autolink attempt (www. / http(s):// / bare email).
     // A bare email local part may start with an alnum or . + - _
-    if (c === 'w' || c === 'h' || isAlphaNum(c) || c === '.' || c === '+' || c === '-' || c === '_') {
+    // Extended autolinks do NOT fire inside a link's text (marked's
+    // url tokenizer checks state.inLink); <...> autolinks still do.
+    if (!inLink && (c === 'w' || c === 'h' || isAlphaNum(c) || c === '.' || c === '+' || c === '-' || c === '_')) {
       const prev = i === 0 ? edgePrev : text[i - 1];
       // an unclosed '_' emphasis opener means a trailing '_' after the
       // autolink is a closing delimiter, not a voiding char
