@@ -544,16 +544,17 @@ function matchAutolink(s, i) {
 
 // GFM extended autolinks: www., http(s)://, bare email.
 // Returns {href, text, next} or null. `prev` is the char before the match.
-function matchExtendedAutolink(s, i, prev) {
+function matchExtendedAutolink(s, i, prev, allowTrailingUnderscore = false) {
   // must be at a word boundary: start, whitespace, or punctuation (not alnum)
-  if (prev !== undefined && (isUnicodeAlnum(prev) || prev === '_' )) return null;
+  if (prev !== undefined && isUnicodeAlnum(prev)) return null;
   let m = /^www\.[\w-]+(\.[\w-]+)*(:\d+)?[^\s<]*/.exec(s.slice(i));
   if (m) {
     let url = trimAutolinkEnd(m[0]);
     if (url.length <= 4) return null;
     return { href: 'http://' + url, text: url, next: i + url.length };
   }
-  m = /^https?:\/\/[^\s<]+/.exec(s.slice(i));
+  // scheme is case-insensitive in marked ([hH][tT][tT][pP][sS]?|[fF][tT][pP])
+  m = /^(?:https?|ftp):\/\/[^\s<]+/i.exec(s.slice(i));
   if (m) {
     let url = trimAutolinkEnd(m[0]);
     return { href: cleanUrl(url) ?? url, text: url, next: i + url.length };
@@ -564,7 +565,7 @@ function matchExtendedAutolink(s, i, prev) {
   if (m) {
     let url = trimAutolinkEnd(m[0]);
     const after = s[i + url.length];
-    if (after === '-' || after === '_') return null;
+		if (after === '-' || (after === '_' && !allowTrailingUnderscore)) return null;
     const at = url.indexOf('@');
     if (at > 0 && url.indexOf('.', at) === -1) return null;
     return { href: cleanUrl(url) ?? url, text: url, next: i + url.length };
@@ -574,7 +575,7 @@ function matchExtendedAutolink(s, i, prev) {
     let url = trimAutolinkEnd(m[0]);
     // a domain may not end with - or _; such a trailing char voids the link
     const after = s[i + url.length];
-    if (after === '-' || after === '_') return null;
+		if (after === '-' || (after === '_' && !allowTrailingUnderscore)) return null;
     // an email autolink needs a dot in the domain part
     const at = url.indexOf('@');
     if (at > 0 && url.indexOf('.', at) === -1) return null;
@@ -680,7 +681,11 @@ function parseInline(text, refs, edgePrev, edgeNext) {
     // A bare email local part may start with an alnum or . + - _
     if (c === 'w' || c === 'h' || isAlphaNum(c) || c === '.' || c === '+' || c === '-' || c === '_') {
       const prev = i === 0 ? edgePrev : text[i - 1];
-      const ext = matchExtendedAutolink(text, i, prev);
+      // an unclosed '_' emphasis opener means a trailing '_' after the
+      // autolink is a closing delimiter, not a voiding char
+      let openUnd = false;
+      for (const nd of nodes) if (nd.t === 'delim' && nd.ch === '_' && nd.canOpen) { openUnd = true; break; }
+      const ext = matchExtendedAutolink(text, i, prev, openUnd);
       if (ext) {
         flush();
         nodes.push({ t: 'link', href: ext.href, title: null, children: [{ t: 'text', s: ext.text }], img: false, autolink: true });
@@ -787,7 +792,7 @@ function parseInline(text, refs, edgePrev, edgeNext) {
       const ch = text[j];
       if (SPECIAL.has(ch) || ch === '@' || ch === ' ') break;
       if (j > i && ch === 'w' && text.startsWith('www.', j)) break;
-      if (j > i && ch === 'h' && (text.startsWith('http://', j) || text.startsWith('https://', j))) break;
+      if (j > i && (ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F') && /^(?:https?|ftp):\/\//i.test(text.slice(j))) break;
       j++;
     }
     if (j === i) j = i + 1; // guarantee progress (autolink start that failed)
